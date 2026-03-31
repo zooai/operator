@@ -1,0 +1,25 @@
+apiVersion: zoo.network/v1alpha1
+kind: ZooNetwork
+metadata:
+  name: zoo-devnet
+  namespace: devnet
+spec:
+  networkId: 3
+  validators: 5
+  image:
+    repository: ghcr.io/zoo-labs/node
+    tag: dev
+  storage:
+    size: 50Gi
+  resources:
+    cpuRequest: "2"
+    cpuLimit: "4"
+    memoryRequest: 4Gi
+    memoryLimit: 8Gi
+  ports:
+    staking: 9651
+    http: 9650
+  service:
+    serviceType: ClusterIP
+  metrics:
+    enabled: true

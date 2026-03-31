@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zoo-operator
+  namespace: zoo-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zoo-operator
+rules:
+  # CRDs
+  - apiGroups: ["zoo.network"]
+    resources:
+      - zoonetworks
+      - zoonetworks/status
+      - zoochains
+      - zoochains/status
+      - zooexplorers
+      - zooexplorers/status
+      - zoogateways
+      - zoogateways/status
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core resources managed by the operator
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+      - events
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # StatefulSets and Deployments
+  - apiGroups: ["apps"]
+    resources:
+      - statefulsets
+      - deployments
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election via Lease
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zoo-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zoo-operator
+subjects:
+  - kind: ServiceAccount
+    name: zoo-operator
+    namespace: zoo-system

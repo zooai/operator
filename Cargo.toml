@@ -1,0 +1,40 @@
+[package]
+name = "zoo-operator"
+version = "0.1.0"
+edition = "2021"
+description = "Zoo Network Kubernetes Operator"
+repository = "https://github.com/zooai/operator"
+
+[[bin]]
+name = "zoo-operator"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+
+# Kubernetes
+kube = { version = "0.87", features = ["runtime", "derive", "ws"] }
+k8s-openapi = { version = "0.20", features = ["v1_28"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP server (health + metrics)
+axum = "0.7"
+
+# Utils
+thiserror = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+schemars = "0.8"
+prometheus = { version = "0.14.0", default-features = false }

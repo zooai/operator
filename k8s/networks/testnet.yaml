@@ -1,0 +1,25 @@
+apiVersion: zoo.network/v1alpha1
+kind: ZooNetwork
+metadata:
+  name: zoo-testnet
+  namespace: testnet
+spec:
+  networkId: 2
+  validators: 5
+  image:
+    repository: ghcr.io/zoo-labs/node
+    tag: test
+  storage:
+    size: 200Gi
+  resources:
+    cpuRequest: "4"
+    cpuLimit: "8"
+    memoryRequest: 8Gi
+    memoryLimit: 16Gi
+  ports:
+    staking: 9651
+    http: 9650
+  service:
+    serviceType: ClusterIP
+  metrics:
+    enabled: true
