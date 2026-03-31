@@ -55,7 +55,7 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ghcr.io/zooai/operator:${{ github.sha }}
-            ghcr.io/zooai/operator:${{ github.ref_name }}
+            ghcr.io/zoo-labs/operator:${{ github.sha }}
+            ghcr.io/zoo-labs/operator:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

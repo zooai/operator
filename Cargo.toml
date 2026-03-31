@@ -3,7 +3,7 @@ name = "zoo-operator"
 version = "0.1.0"
 edition = "2021"
 description = "Zoo Network Kubernetes Operator"
-repository = "https://github.com/zooai/operator"
+repository = "https://github.com/zoo-labs/operator"
 
 [[bin]]
 name = "zoo-operator"
