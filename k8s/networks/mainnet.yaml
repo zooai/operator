@@ -1,0 +1,27 @@
+apiVersion: zoo.network/v1alpha1
+kind: ZooNetwork
+metadata:
+  name: zoo-mainnet
+  namespace: mainnet
+spec:
+  networkId: 1
+  validators: 5
+  image:
+    repository: ghcr.io/zoo-labs/node
+    tag: main
+  storage:
+    size: 500Gi
+    storageClass: premium-rwo
+  resources:
+    cpuRequest: "8"
+    cpuLimit: "16"
+    memoryRequest: 16Gi
+    memoryLimit: 32Gi
+  ports:
+    staking: 9651
+    http: 9650
+  service:
+    serviceType: ClusterIP
+    perPodServices: true
+  metrics:
+    enabled: true
