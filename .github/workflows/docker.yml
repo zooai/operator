@@ -10,4 +10,6 @@ jobs:
     uses: hanzoai/.github/.github/workflows/docker-build.yml@main
     with:
       image: ghcr.io/zooai/operator
+      runner-amd64: ubuntu-latest
+      runner-arm64: ubuntu-24.04-arm
     secrets: inherit
