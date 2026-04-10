@@ -6,6 +6,10 @@ on:
     branches: [main, dev]
     tags: ['v*']
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   docker:
     uses: hanzoai/.github/.github/workflows/docker-build.yml@main
