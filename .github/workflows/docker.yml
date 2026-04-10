@@ -1,0 +1,13 @@
+name: Docker
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+
+jobs:
+  docker:
+    uses: hanzoai/.github/.github/workflows/docker-build.yml@main
+    with:
+      image: ghcr.io/zooai/operator
+    secrets: inherit
