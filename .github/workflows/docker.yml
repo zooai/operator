@@ -3,7 +3,7 @@ name: Docker
 on:
   workflow_dispatch:
   push:
-    branches: [main, dev]
+    branches: [main, dev, test]
     tags: ['v*']
 
 permissions:
@@ -15,6 +15,6 @@ jobs:
     uses: hanzoai/.github/.github/workflows/docker-build.yml@main
     with:
       image: ghcr.io/zooai/operator
-      runner-amd64: ubuntu-latest
-      runner-arm64: ubuntu-24.04-arm
+      runner-amd64: zoo-build-linux-amd64
+      runner-arm64: zoo-build-linux-arm64
     secrets: inherit
