@@ -167,8 +167,15 @@ pub struct ZooExplorerSpec {
     #[serde(default = "default_explorer_image")]
     pub image: String,
 
-    /// Database URL for the explorer backend
-    pub database_url: String,
+    /// RPC endpoint URL for the chain to index
+    pub rpc_endpoint: String,
+
+    /// Chain identifier passed to --chain (e.g. "cchain", "zoo")
+    pub chain_name: String,
+
+    /// Coin symbol (e.g. "ZOO")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coin_symbol: Option<String>,
 
     /// Service configuration
     #[serde(default)]
@@ -176,7 +183,7 @@ pub struct ZooExplorerSpec {
 }
 
 fn default_explorer_image() -> String {
-    "blockscout/blockscout:latest".to_string()
+    "ghcr.io/luxfi/indexer:main".to_string()
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
@@ -192,7 +199,7 @@ pub struct ExplorerServiceSpec {
 }
 
 fn default_explorer_port() -> u16 {
-    4000
+    8090
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]

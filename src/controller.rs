@@ -6,7 +6,7 @@ use crate::crd::{
 };
 use crate::error::{OperatorError, Result};
 use futures::StreamExt;
-use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec,
     PodTemplateSpec, Probe, ResourceRequirements, Service, ServicePort,
@@ -649,15 +649,169 @@ async fn reconcile_explorer(
     let start = Instant::now();
     let name = explorer.name_any();
     let namespace = explorer.namespace().unwrap_or_else(|| "default".to_string());
+    let spec = &explorer.spec;
 
     info!("Reconciling ZooExplorer {}/{}", namespace, name);
 
-    let explorers: Api<ZooExplorer> = Api::namespaced(ctx.client.clone(), &namespace);
+    let deploy_name = format!("{}-explorer", name);
+    let port = spec.service.port as i32;
 
+    let mut labels = BTreeMap::new();
+    labels.insert("app.kubernetes.io/name".to_string(), "zoo-explorer".to_string());
+    labels.insert("app.kubernetes.io/instance".to_string(), name.clone());
+    labels.insert("app.kubernetes.io/component".to_string(), "explorer".to_string());
+    labels.insert("app.kubernetes.io/managed-by".to_string(), "zoo-operator".to_string());
+
+    let owner_ref = OwnerReference {
+        api_version: "zoo.network/v1alpha1".to_string(),
+        kind: "ZooExplorer".to_string(),
+        name: name.clone(),
+        uid: explorer.metadata.uid.clone().unwrap_or_default(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    };
+
+    let mut env_vars = vec![
+        EnvVar {
+            name: "DATA_DIR".to_string(),
+            value: Some("/tmp/data".to_string()),
+            ..Default::default()
+        },
+    ];
+
+    if let Some(symbol) = &spec.coin_symbol {
+        env_vars.push(EnvVar {
+            name: "COIN_SYMBOL".to_string(),
+            value: Some(symbol.clone()),
+            ..Default::default()
+        });
+    }
+
+    let args = vec![
+        "--rpc".to_string(),
+        spec.rpc_endpoint.clone(),
+        "--chain".to_string(),
+        spec.chain_name.clone(),
+        "--port".to_string(),
+        port.to_string(),
+    ];
+
+    let deployment = Deployment {
+        metadata: kube::core::ObjectMeta {
+            name: Some(deploy_name.clone()),
+            namespace: Some(namespace.clone()),
+            labels: Some(labels.clone()),
+            owner_references: Some(vec![owner_ref.clone()]),
+            ..Default::default()
+        },
+        spec: Some(DeploymentSpec {
+            replicas: Some(1),
+            selector: LabelSelector {
+                match_labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            template: PodTemplateSpec {
+                metadata: Some(kube::core::ObjectMeta {
+                    labels: Some(labels.clone()),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: "indexer".to_string(),
+                        image: Some(spec.image.clone()),
+                        args: Some(args),
+                        ports: Some(vec![ContainerPort {
+                            container_port: port,
+                            name: Some("http".to_string()),
+                            ..Default::default()
+                        }]),
+                        env: Some(env_vars),
+                        liveness_probe: Some(Probe {
+                            http_get: Some(
+                                k8s_openapi::api::core::v1::HTTPGetAction {
+                                    path: Some("/health".to_string()),
+                                    port: IntOrString::Int(port),
+                                    ..Default::default()
+                                },
+                            ),
+                            initial_delay_seconds: Some(10),
+                            period_seconds: Some(30),
+                            ..Default::default()
+                        }),
+                        readiness_probe: Some(Probe {
+                            http_get: Some(
+                                k8s_openapi::api::core::v1::HTTPGetAction {
+                                    path: Some("/health".to_string()),
+                                    port: IntOrString::Int(port),
+                                    ..Default::default()
+                                },
+                            ),
+                            initial_delay_seconds: Some(5),
+                            period_seconds: Some(10),
+                            ..Default::default()
+                        }),
+                        security_context: Some(k8s_openapi::api::core::v1::SecurityContext {
+                            run_as_non_root: Some(true),
+                            run_as_user: Some(65532),
+                            read_only_root_filesystem: Some(false),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let svc = Service {
+        metadata: kube::core::ObjectMeta {
+            name: Some(deploy_name.clone()),
+            namespace: Some(namespace.clone()),
+            labels: Some(labels.clone()),
+            owner_references: Some(vec![owner_ref]),
+            ..Default::default()
+        },
+        spec: Some(K8sServiceSpec {
+            selector: Some(labels),
+            ports: Some(vec![ServicePort {
+                name: Some("http".to_string()),
+                port: port,
+                target_port: Some(IntOrString::Int(port)),
+                ..Default::default()
+            }]),
+            type_: Some(spec.service.service_type.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let pp = PatchParams::apply("zoo-operator").force();
+    let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &namespace);
+    deploy_api
+        .patch(&deploy_name, &pp, &Patch::Apply(deployment))
+        .await
+        .map_err(OperatorError::KubeApi)?;
+
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &namespace);
+    svc_api
+        .patch(&deploy_name, &pp, &Patch::Apply(svc))
+        .await
+        .map_err(OperatorError::KubeApi)?;
+
+    // Check readiness
+    let ready = match deploy_api.get(&deploy_name).await {
+        Ok(d) => d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0) > 0,
+        Err(_) => false,
+    };
+
+    let explorers: Api<ZooExplorer> = Api::namespaced(ctx.client.clone(), &namespace);
     let status = ZooExplorerStatus {
-        phase: "Pending".to_string(),
+        phase: if ready { "Ready" } else { "Creating" }.to_string(),
         url: String::new(),
-        message: "Explorer tracked, deployment managed externally".to_string(),
+        message: String::new(),
     };
 
     let patch = Patch::Merge(serde_json::json!({ "status": status }));
@@ -667,7 +821,7 @@ async fn reconcile_explorer(
         .map_err(OperatorError::KubeApi)?;
 
     crate::metrics::record_reconcile(&name, "success", start);
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_secs(60)))
 }
 
 // ───────────────────────── ZooGateway Controller ─────────────────────────
