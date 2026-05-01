@@ -10,6 +10,11 @@ name = "zoo-operator"
 path = "src/main.rs"
 
 [dependencies]
+# Shared reconciler primitives. See ~/work/hanzo/operator-core for the
+# canonical leader / IAM admin / KMS / status logic. Zoo operator gains
+# IAM upsert + KMSSecret reconciler hooks via this dep.
+hanzo-operator-core = { git = "https://github.com/hanzoai/operator-core", tag = "v0.1.0" }
+
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 futures = "0.3"
