@@ -266,19 +266,42 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
         },
     ];
 
-    // Add config overrides as env vars
+    // spec.config entries become both LUXD_*-prefixed env vars (viper
+    // EnvPrefix in luxfi/node/config) AND --kebab-case CLI args. luxd
+    // resolves the same setting via either path; emitting both means a
+    // user can override at runtime via env without rebuilding the
+    // CR, and the CLI args show up in `ps`/k8s describe for forensics.
+    //
+    // Key mapping: spec.config key `BOOTSTRAP_IPS` →
+    //   env: LUXD_BOOTSTRAP_IPS=<value>
+    //   arg: --bootstrap-ips=<value>
+    let mut config_args: Vec<String> = Vec::new();
     for (key, value) in &network.spec.config {
-        let env_name = format!("ZOO_{}", key.to_uppercase().replace('-', "_"));
-        let env_val = match value {
+        let val_str = match value {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
         };
+        let env_name = format!("LUXD_{}", key.to_uppercase().replace('-', "_"));
         env_vars.push(EnvVar {
             name: env_name,
-            value: Some(env_val),
+            value: Some(val_str.clone()),
             ..Default::default()
         });
+        let flag = key.to_lowercase().replace('_', "-");
+        config_args.push(format!("--{}={}", flag, val_str));
     }
+    // Always-on baseline args (network-id + ports). spec.config can
+    // override by re-declaring the same key; later-wins is fine since
+    // luxd's flag parser takes the last value.
+    let mut node_args: Vec<String> = vec![
+        format!("--network-id={}", network.spec.network_id),
+        format!("--http-host=0.0.0.0"),
+        format!("--http-port={}", network.spec.ports.http),
+        format!("--staking-port={}", network.spec.ports.staking),
+        format!("--data-dir=/data"),
+        format!("--plugin-dir=/data/plugins"),
+    ];
+    node_args.extend(config_args);
 
     let mut resources = BTreeMap::new();
     resources.insert(
@@ -339,6 +362,7 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
                                 ..Default::default()
                             },
                         ]),
+                        args: Some(node_args),
                         env: Some(env_vars),
                         resources: Some(ResourceRequirements {
                             requests: Some(resources),
