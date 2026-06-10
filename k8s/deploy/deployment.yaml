@@ -19,7 +19,7 @@ spec:
       serviceAccountName: zoo-operator
       containers:
         - name: zoo-operator
-          image: ghcr.io/zooai/operator:v0.1.1
+          image: ghcr.io/zooai/operator:v0.1.2
           args:
             - --leader-election=true
             - --log-level=info
