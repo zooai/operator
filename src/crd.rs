@@ -145,7 +145,7 @@ pub struct ZooChainStatus {
 
 // ───────────────────────── ZooExplorer ─────────────────────────
 
-/// ZooExplorer manages Blockscout explorer instances for Zoo chains.
+/// ZooExplorer manages Lux explorer (Go binary) instances for Zoo chains.
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "zoo.network",
@@ -183,7 +183,7 @@ pub struct ZooExplorerSpec {
 }
 
 fn default_explorer_image() -> String {
-    "ghcr.io/luxfi/indexer:main".to_string()
+    "ghcr.io/luxfi/explorer:1.2.18".to_string()
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
