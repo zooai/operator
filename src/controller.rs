@@ -4,7 +4,9 @@ use crate::crd::{
     ZooChain, ZooChainStatus, ZooExplorer, ZooExplorerStatus, ZooGateway, ZooGatewayStatus,
     ZooNetwork, ZooNetworkStatus,
 };
+use crate::delegate::{Delegate, Routed};
 use crate::error::{OperatorError, Result};
+use crate::translator;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
@@ -32,14 +34,27 @@ use tracing::{debug, error, info, warn};
 /// Controller context shared across all reconcile functions.
 pub struct Context {
     pub client: Client,
+    /// Backend that canonical `bootno.de` resources are routed through. With
+    /// the default [`crate::delegate::Backend::Local`] every reconcile runs the
+    /// built-in controller body below; a remote backend takes ownership and the
+    /// body is skipped in favour of bootnode's reconcile.
+    pub delegate: Delegate,
+}
+
+impl Context {
+    pub fn new(client: Client, delegate: Delegate) -> Self {
+        Self { client, delegate }
+    }
 }
 
 // ───────────────────────── ZooNetwork Controller ─────────────────────────
 
-pub async fn run_network_controller(client: Client, namespace: String) -> Result<()> {
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-    });
+pub async fn run_network_controller(
+    client: Client,
+    namespace: String,
+    delegate: Delegate,
+) -> Result<()> {
+    let ctx = Arc::new(Context::new(client.clone(), delegate));
 
     let networks: Api<ZooNetwork> = if namespace.is_empty() {
         Api::all(client.clone())
@@ -84,6 +99,30 @@ async fn reconcile_network(network: Arc<ZooNetwork>, ctx: Arc<Context>) -> Resul
     info!("Reconciling ZooNetwork {}/{}", namespace, name);
 
     let networks: Api<ZooNetwork> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    // Brand -> canonical hand-off. With the default Local backend this returns
+    // Routed::Local and the built-in body below runs unchanged; a remote
+    // backend owns the reconcile and we translate its status back.
+    let canonical = translator::network_to_canonical(&network.spec);
+    if let Routed::Delegated = ctx
+        .delegate
+        .reconcile("Network", serde_json::to_value(&canonical)?)
+        .await?
+    {
+        let canonical_status = translator::NetworkStatus {
+            total_validators: network.spec.validators,
+            ..Default::default()
+        };
+        let zoo_status = translator::network_from_canonical(&canonical_status);
+        let patch = Patch::Merge(serde_json::json!({ "status": zoo_status }));
+        networks
+            .patch_status(&name, &PatchParams::default(), &patch)
+            .await
+            .map_err(OperatorError::KubeApi)?;
+        crate::metrics::record_reconcile(&name, "success", start);
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
+
     let current_status = network.status.clone().unwrap_or_default();
     let phase = current_status.phase.as_str();
 
@@ -102,11 +141,7 @@ async fn reconcile_network(network: Arc<ZooNetwork>, ctx: Arc<Context>) -> Resul
             // Sync StatefulSet replicas if changed
             let statefulsets: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &namespace);
             if let Ok(sts) = statefulsets.get(&name).await {
-                let current = sts
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.replicas)
-                    .unwrap_or(0) as u32;
+                let current = sts.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0) as u32;
                 if current != network.spec.validators {
                     info!(
                         "Network {} scaling: {} -> {} validators",
@@ -174,10 +209,7 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
 
     let labels: BTreeMap<String, String> = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), "zoo-node".to_string()),
-        (
-            "app.kubernetes.io/instance".to_string(),
-            name.clone(),
-        ),
+        ("app.kubernetes.io/instance".to_string(), name.clone()),
         (
             "app.kubernetes.io/managed-by".to_string(),
             "zoo-operator".to_string(),
@@ -246,7 +278,10 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
     };
 
     // StatefulSet
-    let image = format!("{}:{}", network.spec.image.repository, network.spec.image.tag);
+    let image = format!(
+        "{}:{}",
+        network.spec.image.repository, network.spec.image.tag
+    );
 
     let mut env_vars = vec![
         EnvVar {
@@ -375,25 +410,21 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
                             ..Default::default()
                         }]),
                         liveness_probe: Some(Probe {
-                            http_get: Some(
-                                k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/ext/health".to_string()),
-                                    port: IntOrString::Int(network.spec.ports.http as i32),
-                                    ..Default::default()
-                                },
-                            ),
+                            http_get: Some(k8s_openapi::api::core::v1::HTTPGetAction {
+                                path: Some("/ext/health".to_string()),
+                                port: IntOrString::Int(network.spec.ports.http as i32),
+                                ..Default::default()
+                            }),
                             initial_delay_seconds: Some(30),
                             period_seconds: Some(30),
                             ..Default::default()
                         }),
                         readiness_probe: Some(Probe {
-                            http_get: Some(
-                                k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/ext/health".to_string()),
-                                    port: IntOrString::Int(network.spec.ports.http as i32),
-                                    ..Default::default()
-                                },
-                            ),
+                            http_get: Some(k8s_openapi::api::core::v1::HTTPGetAction {
+                                path: Some("/ext/health".to_string()),
+                                port: IntOrString::Int(network.spec.ports.http as i32),
+                                ..Default::default()
+                            }),
                             initial_delay_seconds: Some(10),
                             period_seconds: Some(10),
                             ..Default::default()
@@ -462,10 +493,7 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
 }
 
 /// Check if all pods in the StatefulSet are ready.
-async fn check_creation_progress(
-    network: &ZooNetwork,
-    ctx: &Context,
-) -> Result<ZooNetworkStatus> {
+async fn check_creation_progress(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetworkStatus> {
     let name = network.name_any();
     let namespace = network.namespace().unwrap_or_else(|| "default".to_string());
 
@@ -558,10 +586,12 @@ async fn check_health(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetworkS
 
 // ───────────────────────── ZooChain Controller ─────────────────────────
 
-pub async fn run_chain_controller(client: Client, namespace: String) -> Result<()> {
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-    });
+pub async fn run_chain_controller(
+    client: Client,
+    namespace: String,
+    delegate: Delegate,
+) -> Result<()> {
+    let ctx = Arc::new(Context::new(client.clone(), delegate));
 
     let chains: Api<ZooChain> = if namespace.is_empty() {
         Api::all(client.clone())
@@ -584,17 +614,9 @@ pub async fn run_chain_controller(client: Client, namespace: String) -> Result<(
     Ok(())
 }
 
-fn chain_error_policy(
-    chain: Arc<ZooChain>,
-    error: &OperatorError,
-    _ctx: Arc<Context>,
-) -> Action {
+fn chain_error_policy(chain: Arc<ZooChain>, error: &OperatorError, _ctx: Arc<Context>) -> Action {
     crate::metrics::record_reconcile(&chain.name_any(), "error", Instant::now());
-    error!(
-        "Error reconciling chain {}: {:?}",
-        chain.name_any(),
-        error
-    );
+    error!("Error reconciling chain {}: {:?}", chain.name_any(), error);
     Action::requeue(Duration::from_secs(30))
 }
 
@@ -606,6 +628,28 @@ async fn reconcile_chain(chain: Arc<ZooChain>, ctx: Arc<Context>) -> Result<Acti
     info!("Reconciling ZooChain {}/{}", namespace, name);
 
     let chains: Api<ZooChain> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    let canonical = translator::chain_to_canonical(&chain.spec);
+    if let Routed::Delegated = ctx
+        .delegate
+        .reconcile("Chain", serde_json::to_value(&canonical)?)
+        .await?
+    {
+        let canonical_status = translator::ChainStatus {
+            phase: "Active".to_string(),
+            chain_id: chain.spec.chain_id.to_string(),
+            blockchain_id: chain.spec.blockchain_id.clone().unwrap_or_default(),
+            message: "Delegated to bootnode".to_string(),
+        };
+        let zoo_status = translator::chain_from_canonical(&canonical_status);
+        let patch = Patch::Merge(serde_json::json!({ "status": zoo_status }));
+        chains
+            .patch_status(&name, &PatchParams::default(), &patch)
+            .await
+            .map_err(OperatorError::KubeApi)?;
+        crate::metrics::record_reconcile(&name, "success", start);
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
 
     let status = ZooChainStatus {
         phase: "Active".to_string(),
@@ -626,10 +670,12 @@ async fn reconcile_chain(chain: Arc<ZooChain>, ctx: Arc<Context>) -> Result<Acti
 
 // ───────────────────────── ZooExplorer Controller ─────────────────────────
 
-pub async fn run_explorer_controller(client: Client, namespace: String) -> Result<()> {
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-    });
+pub async fn run_explorer_controller(
+    client: Client,
+    namespace: String,
+    delegate: Delegate,
+) -> Result<()> {
+    let ctx = Arc::new(Context::new(client.clone(), delegate));
 
     let explorers: Api<ZooExplorer> = if namespace.is_empty() {
         Api::all(client.clone())
@@ -666,25 +712,54 @@ fn explorer_error_policy(
     Action::requeue(Duration::from_secs(30))
 }
 
-async fn reconcile_explorer(
-    explorer: Arc<ZooExplorer>,
-    ctx: Arc<Context>,
-) -> Result<Action> {
+async fn reconcile_explorer(explorer: Arc<ZooExplorer>, ctx: Arc<Context>) -> Result<Action> {
     let start = Instant::now();
     let name = explorer.name_any();
-    let namespace = explorer.namespace().unwrap_or_else(|| "default".to_string());
+    let namespace = explorer
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
     let spec = &explorer.spec;
 
     info!("Reconciling ZooExplorer {}/{}", namespace, name);
+
+    let canonical = translator::explorer_to_canonical(&explorer.spec);
+    if let Routed::Delegated = ctx
+        .delegate
+        .reconcile("Explorer", serde_json::to_value(&canonical)?)
+        .await?
+    {
+        let canonical_status = translator::ExplorerStatus {
+            phase: "Delegated".to_string(),
+            ..Default::default()
+        };
+        let zoo_status = translator::explorer_from_canonical(&canonical_status);
+        let explorers: Api<ZooExplorer> = Api::namespaced(ctx.client.clone(), &namespace);
+        let patch = Patch::Merge(serde_json::json!({ "status": zoo_status }));
+        explorers
+            .patch_status(&name, &PatchParams::default(), &patch)
+            .await
+            .map_err(OperatorError::KubeApi)?;
+        crate::metrics::record_reconcile(&name, "success", start);
+        return Ok(Action::requeue(Duration::from_secs(60)));
+    }
 
     let deploy_name = format!("{}-explorer", name);
     let port = spec.service.port as i32;
 
     let mut labels = BTreeMap::new();
-    labels.insert("app.kubernetes.io/name".to_string(), "zoo-explorer".to_string());
+    labels.insert(
+        "app.kubernetes.io/name".to_string(),
+        "zoo-explorer".to_string(),
+    );
     labels.insert("app.kubernetes.io/instance".to_string(), name.clone());
-    labels.insert("app.kubernetes.io/component".to_string(), "explorer".to_string());
-    labels.insert("app.kubernetes.io/managed-by".to_string(), "zoo-operator".to_string());
+    labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        "explorer".to_string(),
+    );
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "zoo-operator".to_string(),
+    );
 
     let owner_ref = OwnerReference {
         api_version: "zoo.network/v1alpha1".to_string(),
@@ -695,13 +770,11 @@ async fn reconcile_explorer(
         block_owner_deletion: Some(true),
     };
 
-    let mut env_vars = vec![
-        EnvVar {
-            name: "DATA_DIR".to_string(),
-            value: Some("/tmp/data".to_string()),
-            ..Default::default()
-        },
-    ];
+    let mut env_vars = vec![EnvVar {
+        name: "DATA_DIR".to_string(),
+        value: Some("/tmp/data".to_string()),
+        ..Default::default()
+    }];
 
     if let Some(symbol) = &spec.coin_symbol {
         env_vars.push(EnvVar {
@@ -751,25 +824,21 @@ async fn reconcile_explorer(
                         }]),
                         env: Some(env_vars),
                         liveness_probe: Some(Probe {
-                            http_get: Some(
-                                k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/health".to_string()),
-                                    port: IntOrString::Int(port),
-                                    ..Default::default()
-                                },
-                            ),
+                            http_get: Some(k8s_openapi::api::core::v1::HTTPGetAction {
+                                path: Some("/health".to_string()),
+                                port: IntOrString::Int(port),
+                                ..Default::default()
+                            }),
                             initial_delay_seconds: Some(10),
                             period_seconds: Some(30),
                             ..Default::default()
                         }),
                         readiness_probe: Some(Probe {
-                            http_get: Some(
-                                k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/health".to_string()),
-                                    port: IntOrString::Int(port),
-                                    ..Default::default()
-                                },
-                            ),
+                            http_get: Some(k8s_openapi::api::core::v1::HTTPGetAction {
+                                path: Some("/health".to_string()),
+                                port: IntOrString::Int(port),
+                                ..Default::default()
+                            }),
                             initial_delay_seconds: Some(5),
                             period_seconds: Some(10),
                             ..Default::default()
@@ -802,7 +871,7 @@ async fn reconcile_explorer(
             selector: Some(labels),
             ports: Some(vec![ServicePort {
                 name: Some("http".to_string()),
-                port: port,
+                port,
                 target_port: Some(IntOrString::Int(port)),
                 ..Default::default()
             }]),
@@ -827,7 +896,13 @@ async fn reconcile_explorer(
 
     // Check readiness
     let ready = match deploy_api.get(&deploy_name).await {
-        Ok(d) => d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0) > 0,
+        Ok(d) => {
+            d.status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0)
+                > 0
+        }
         Err(_) => false,
     };
 
@@ -850,10 +925,12 @@ async fn reconcile_explorer(
 
 // ───────────────────────── ZooGateway Controller ─────────────────────────
 
-pub async fn run_gateway_controller(client: Client, namespace: String) -> Result<()> {
-    let ctx = Arc::new(Context {
-        client: client.clone(),
-    });
+pub async fn run_gateway_controller(
+    client: Client,
+    namespace: String,
+    delegate: Delegate,
+) -> Result<()> {
+    let ctx = Arc::new(Context::new(client.clone(), delegate));
 
     let gateways: Api<ZooGateway> = if namespace.is_empty() {
         Api::all(client.clone())
@@ -890,10 +967,7 @@ fn gateway_error_policy(
     Action::requeue(Duration::from_secs(30))
 }
 
-async fn reconcile_gateway(
-    gateway: Arc<ZooGateway>,
-    ctx: Arc<Context>,
-) -> Result<Action> {
+async fn reconcile_gateway(gateway: Arc<ZooGateway>, ctx: Arc<Context>) -> Result<Action> {
     let start = Instant::now();
     let name = gateway.name_any();
     let namespace = gateway.namespace().unwrap_or_else(|| "default".to_string());
@@ -901,6 +975,27 @@ async fn reconcile_gateway(
     info!("Reconciling ZooGateway {}/{}", namespace, name);
 
     let gateways: Api<ZooGateway> = Api::namespaced(ctx.client.clone(), &namespace);
+
+    let canonical = translator::gateway_to_canonical(&gateway.spec);
+    if let Routed::Delegated = ctx
+        .delegate
+        .reconcile("Gateway", serde_json::to_value(&canonical)?)
+        .await?
+    {
+        let canonical_status = translator::GatewayStatus {
+            phase: "Delegated".to_string(),
+            route_count: gateway.spec.hosts.len() as u32,
+            message: "Delegated to bootnode".to_string(),
+        };
+        let zoo_status = translator::gateway_from_canonical(&canonical_status);
+        let patch = Patch::Merge(serde_json::json!({ "status": zoo_status }));
+        gateways
+            .patch_status(&name, &PatchParams::default(), &patch)
+            .await
+            .map_err(OperatorError::KubeApi)?;
+        crate::metrics::record_reconcile(&name, "success", start);
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
 
     let status = ZooGatewayStatus {
         phase: "Pending".to_string(),
