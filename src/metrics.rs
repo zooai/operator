@@ -141,7 +141,13 @@ pub fn record_reconcile(resource: &str, result: &str, start: Instant) {
 /// Set the current phase for a network.
 pub fn set_network_phase(network: &str, phase: &str) {
     let m = get();
-    for p in &["Pending", "Creating", "Bootstrapping", "Running", "Degraded"] {
+    for p in &[
+        "Pending",
+        "Creating",
+        "Bootstrapping",
+        "Running",
+        "Degraded",
+    ] {
         m.network_phase
             .with_label_values(&[network, p])
             .set(if *p == phase { 1.0 } else { 0.0 });

@@ -8,9 +8,11 @@
 
 mod controller;
 mod crd;
+mod delegate;
 mod error;
 mod leader;
 mod metrics;
+mod translator;
 
 use axum::{routing::get, Router};
 use clap::Parser;
@@ -44,6 +46,12 @@ struct Args {
     /// Enable leader election
     #[arg(long, default_value = "true")]
     leader_election: bool,
+
+    /// Delegation backend for canonical bootno.de resources:
+    /// local (built-in controllers), in-process (linked bootnode-operator
+    /// library), or out-of-process (in-cluster bootnode operator via CRs).
+    #[arg(long, env = "ZOO_DELEGATE_BACKEND", default_value = "local")]
+    delegate_backend: String,
 }
 
 async fn healthz() -> &'static str {
@@ -86,7 +94,10 @@ async fn main() -> anyhow::Result<()> {
 
     metrics::init();
 
-    info!("Starting Zoo Network Operator v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting Zoo Network Operator v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("Log level: {}", args.log_level);
     info!(
         "Namespace: {}",
@@ -98,13 +109,17 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Leader election: {}", args.leader_election);
 
+    let delegate_backend = delegate::Backend::parse(&args.delegate_backend)?;
+    let delegate = delegate::Delegate::new(delegate_backend);
+    info!("Delegate backend: {}", delegate.backend());
+
     let client = Client::try_default().await?;
     info!("Connected to Kubernetes cluster");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let operator_namespace = std::env::var("OPERATOR_NAMESPACE")
-        .unwrap_or_else(|_| "zoo-system".to_string());
+    let operator_namespace =
+        std::env::var("OPERATOR_NAMESPACE").unwrap_or_else(|_| "zoo-system".to_string());
     let leader_election = leader::LeaderElection::new(client.clone(), operator_namespace);
     let leader_flag = leader_election.leader_flag();
 
@@ -136,6 +151,10 @@ async fn main() -> anyhow::Result<()> {
     let chain_ns = args.namespace.clone();
     let explorer_ns = args.namespace.clone();
     let gateway_ns = args.namespace.clone();
+    let network_delegate = delegate.clone();
+    let chain_delegate = delegate.clone();
+    let explorer_delegate = delegate.clone();
+    let gateway_delegate = delegate.clone();
 
     let controllers_flag = leader_flag.clone();
 
@@ -162,22 +181,22 @@ async fn main() -> anyhow::Result<()> {
             info!("This instance is the leader, starting controllers");
 
             tokio::select! {
-                res = controller::run_network_controller(network_client, network_ns) => {
+                res = controller::run_network_controller(network_client, network_ns, network_delegate) => {
                     if let Err(e) = res {
                         tracing::error!("Network controller exited with error: {:?}", e);
                     }
                 }
-                res = controller::run_chain_controller(chain_client, chain_ns) => {
+                res = controller::run_chain_controller(chain_client, chain_ns, chain_delegate) => {
                     if let Err(e) = res {
                         tracing::error!("Chain controller exited with error: {:?}", e);
                     }
                 }
-                res = controller::run_explorer_controller(explorer_client, explorer_ns) => {
+                res = controller::run_explorer_controller(explorer_client, explorer_ns, explorer_delegate) => {
                     if let Err(e) = res {
                         tracing::error!("Explorer controller exited with error: {:?}", e);
                     }
                 }
-                res = controller::run_gateway_controller(gateway_client, gateway_ns) => {
+                res = controller::run_gateway_controller(gateway_client, gateway_ns, gateway_delegate) => {
                     if let Err(e) = res {
                         tracing::error!("Gateway controller exited with error: {:?}", e);
                     }

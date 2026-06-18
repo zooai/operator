@@ -26,9 +26,8 @@ pub struct LeaderElection {
 
 impl LeaderElection {
     pub fn new(client: Client, namespace: String) -> Self {
-        let identity = std::env::var("HOSTNAME").unwrap_or_else(|_| {
-            format!("zoo-operator-{}", std::process::id())
-        });
+        let identity = std::env::var("HOSTNAME")
+            .unwrap_or_else(|_| format!("zoo-operator-{}", std::process::id()));
 
         LeaderElection {
             is_leader: Arc::new(AtomicBool::new(false)),

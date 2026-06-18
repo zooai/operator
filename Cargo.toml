@@ -1,8 +1,8 @@
 [package]
 name = "zoo-operator"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
-description = "Zoo Network Kubernetes Operator"
+description = "Zoo Network Kubernetes Operator — thin whitelabel shim over bootnode/operator"
 repository = "https://github.com/zoo-labs/operator"
 
 [[bin]]
@@ -14,6 +14,16 @@ path = "src/main.rs"
 # canonical leader / IAM admin / KMS / status logic. Zoo operator gains
 # IAM upsert + KMSSecret reconciler hooks via this dep.
 hanzo-operator-core = { git = "https://github.com/hanzoai/operator-core", tag = "v0.1.0" }
+
+# Canonical web3 chain orchestration, linked in-process for the
+# `delegate-in-process` backend. Pinned but commented out until Wave 1B
+# publishes bootnode/operator as a library crate: the repo currently has no
+# root Cargo.toml, so Cargo cannot resolve the source even when the dependency
+# is optional and the feature is disabled. The moment bootnode/operator ships
+# a lib target, uncomment this line and the `dep:bootnode-operator` entry in
+# `[features].delegate-in-process` below — no other change is required, because
+# src/delegate.rs already routes through the feature gate.
+# bootnode-operator = { git = "https://github.com/bootnode/operator", branch = "main", optional = true }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -43,3 +53,12 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 schemars = "0.8"
 prometheus = { version = "0.14.0", default-features = false }
+
+[features]
+default = []
+# Link bootnode-operator and reconcile canonical resources in-process.
+# Off by default until Wave 1B publishes the library crate. When the
+# bootnode-operator dependency above is uncommented, restore the
+# `dep:bootnode-operator` activation here; src/delegate.rs already gates the
+# in-process call on this feature so no source change is needed.
+delegate-in-process = []
