@@ -8,9 +8,9 @@ use crate::error::{OperatorError, Result};
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec,
-    PodTemplateSpec, Probe, ResourceRequirements, Service, ServicePort,
-    ServiceSpec as K8sServiceSpec, VolumeMount,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EnvVar, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, Service,
+    ServicePort, ServiceSpec as K8sServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference};
@@ -695,30 +695,40 @@ async fn reconcile_explorer(
         block_owner_deletion: Some(true),
     };
 
-    let mut env_vars = vec![
-        EnvVar {
-            name: "DATA_DIR".to_string(),
-            value: Some("/tmp/data".to_string()),
+    // luxfi/explorer is configured by a chains.yaml file, not by ad-hoc flags —
+    // it only defines -config/-data/-http/-mdns, so the old --rpc/--chain/--port
+    // made it exit 2 on every start. Render the CR into that file instead. JSON
+    // is valid YAML, so serde_json both builds and escapes the document.
+    let coin = spec.coin_symbol.clone().unwrap_or_default();
+    let chains_yaml = serde_json::json!({
+        "data_dir": "/data",
+        "http_addr": format!(":{port}"),
+        "brand_default": { "name": &name, "coin": &coin },
+        "chains": [{
+            "slug": &spec.chain_name,
+            "name": &spec.chain_name,
+            "type": "evm",
+            "rpc": &spec.rpc_endpoint,
+            "coin": &coin,
+            "enabled": true,
+            "default": true,
+        }],
+    })
+    .to_string();
+
+    let config_map = ConfigMap {
+        metadata: kube::core::ObjectMeta {
+            name: Some(deploy_name.clone()),
+            namespace: Some(namespace.clone()),
+            labels: Some(labels.clone()),
+            owner_references: Some(vec![owner_ref.clone()]),
             ..Default::default()
         },
-    ];
+        data: Some(BTreeMap::from([("chains.yaml".to_string(), chains_yaml)])),
+        ..Default::default()
+    };
 
-    if let Some(symbol) = &spec.coin_symbol {
-        env_vars.push(EnvVar {
-            name: "COIN_SYMBOL".to_string(),
-            value: Some(symbol.clone()),
-            ..Default::default()
-        });
-    }
-
-    let args = vec![
-        "--rpc".to_string(),
-        spec.rpc_endpoint.clone(),
-        "--chain".to_string(),
-        spec.chain_name.clone(),
-        "--port".to_string(),
-        port.to_string(),
-    ];
+    let args = vec!["--config=/etc/explorer/chains.yaml".to_string()];
 
     let deployment = Deployment {
         metadata: kube::core::ObjectMeta {
@@ -749,7 +759,19 @@ async fn reconcile_explorer(
                             name: Some("http".to_string()),
                             ..Default::default()
                         }]),
-                        env: Some(env_vars),
+                        volume_mounts: Some(vec![
+                            VolumeMount {
+                                name: "config".to_string(),
+                                mount_path: "/etc/explorer".to_string(),
+                                read_only: Some(true),
+                                ..Default::default()
+                            },
+                            VolumeMount {
+                                name: "data".to_string(),
+                                mount_path: "/data".to_string(),
+                                ..Default::default()
+                            },
+                        ]),
                         liveness_probe: Some(Probe {
                             http_get: Some(
                                 k8s_openapi::api::core::v1::HTTPGetAction {
@@ -782,6 +804,21 @@ async fn reconcile_explorer(
                         }),
                         ..Default::default()
                     }],
+                    volumes: Some(vec![
+                        Volume {
+                            name: "config".to_string(),
+                            config_map: Some(ConfigMapVolumeSource {
+                                name: Some(deploy_name.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        Volume {
+                            name: "data".to_string(),
+                            empty_dir: Some(Default::default()),
+                            ..Default::default()
+                        },
+                    ]),
                     ..Default::default()
                 }),
             },
@@ -813,6 +850,12 @@ async fn reconcile_explorer(
     };
 
     let pp = PatchParams::apply("zoo-operator").force();
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace);
+    cm_api
+        .patch(&deploy_name, &pp, &Patch::Apply(config_map))
+        .await
+        .map_err(OperatorError::KubeApi)?;
+
     let deploy_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &namespace);
     deploy_api
         .patch(&deploy_name, &pp, &Patch::Apply(deployment))
