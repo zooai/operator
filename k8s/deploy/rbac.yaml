@@ -51,7 +51,22 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: zoo-operator
+# The operator runs cluster-scoped (Api::all, --namespace "") and elects a
+# single global leader across every per-network Deployment. Whichever pod wins
+# the lease must be able to list/watch zoo.network resources cluster-wide, so
+# every namespace that runs a zoo-operator Deployment must have its
+# ServiceAccount bound here — otherwise the elected leader gets HTTP 403 on
+# every reconcile and all CRs stall with an empty phase.
 subjects:
   - kind: ServiceAccount
     name: zoo-operator
     namespace: zoo-system
+  - kind: ServiceAccount
+    name: zoo-operator
+    namespace: zoo-mainnet
+  - kind: ServiceAccount
+    name: zoo-operator
+    namespace: zoo-testnet
+  - kind: ServiceAccount
+    name: zoo-operator
+    namespace: zoo-devnet
