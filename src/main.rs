@@ -16,8 +16,7 @@ use axum::{routing::get, Router};
 use clap::Parser;
 use kube::Client;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -50,14 +49,12 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz(
-    axum::extract::State(leader_flag): axum::extract::State<Arc<AtomicBool>>,
-) -> (axum::http::StatusCode, &'static str) {
-    if leader_flag.load(Ordering::Relaxed) {
-        (axum::http::StatusCode::OK, "ok")
-    } else {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not leader")
-    }
+/// Readiness is process health, not leadership. Gating it on the lease left
+/// every standby replica NotReady forever, so its Deployment sat at 0/1 and
+/// looked broken. Who holds the lease is already observable — `kubectl get
+/// lease zoo-operator-leader`.
+async fn readyz() -> &'static str {
+    "ok"
 }
 
 async fn metrics_handler() -> String {
@@ -115,11 +112,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Health server
     let health_addr = SocketAddr::from(([0, 0, 0, 0], args.health_port));
-    let health_flag = leader_flag.clone();
     let health_app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .with_state(health_flag);
+        .route("/readyz", get(readyz));
     info!("Health server listening on {}", health_addr);
 
     // Metrics server
