@@ -377,7 +377,7 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
                         liveness_probe: Some(Probe {
                             http_get: Some(
                                 k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/ext/health".to_string()),
+                                    path: Some("/v1/health".to_string()),
                                     port: IntOrString::Int(network.spec.ports.http as i32),
                                     ..Default::default()
                                 },
@@ -389,7 +389,7 @@ async fn create_network(network: &ZooNetwork, ctx: &Context) -> Result<ZooNetwor
                         readiness_probe: Some(Probe {
                             http_get: Some(
                                 k8s_openapi::api::core::v1::HTTPGetAction {
-                                    path: Some("/ext/health".to_string()),
+                                    path: Some("/v1/health".to_string()),
                                     port: IntOrString::Int(network.spec.ports.http as i32),
                                     ..Default::default()
                                 },
