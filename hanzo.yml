@@ -1,0 +1,9 @@
+# Hanzo CI/CD for zooai/operator: .github/workflows/cicd.yml imports hanzoai/ci,
+# which reads this file. The build door builds each image, one BuildKit Job
+# per platform.
+images:
+  - name: operator
+    context: .
+    dockerfile: Dockerfile
+    repo: ghcr.io/zooai/operator
+    platforms: [linux/amd64]
